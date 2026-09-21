@@ -1,0 +1,2018 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Tlync Payment Gateway Orchestration API",
+    "version": "1.2.0",
+    "description": "# Overview\n\nWelcome to the official developer API reference for the **Tlync Payment Gateway Orchestration & SaaS Platform** (`api/v12`).\n\nTlync provides unified, PCI-compliant payment orchestration across all major Libyan payment networks, banks, and digital wallets, including **Edfali**, **Sadad**, **Mobicash**, **Moamalat**, **Masarat (Yusor & Musrefy)**, and **Tadawul**, along with a sandboxed **Test Gateway** and a turnkey **Hosted Checkout** system.\n\n---\n\n## Core Architecture & Integration Models\n\nTlync offers two primary integration workflows:\n\n### 1. Hosted Checkout (Recommended for Web & Mobile Apps)\n- The merchant server creates a checkout session (`POST /api/v12/checkout/sessions`).\n- The customer is redirected to the Tlync-hosted checkout page (`url` returned in the response).\n- The checkout UI handles gateway selection, OTP inputs, SMS resends, LightBox widgets, and error states automatically.\n- Upon completion, the customer is redirected to the merchant's `frontend_url` and an asynchronous server-to-server webhook is dispatched to `backend_url`.\n\n### 2. Direct Two-Stage Payment API (Custom UI)\nFor merchants embedding payment forms directly inside their own native applications or web checkouts:\n- **Stage 1 (Initiate Payment)**: The merchant calls `POST /api/v12/initiate/payment/{gateway}` with the customer's phone/identity and transaction amount. Tlync acquires atomic locks, validates the request, contacts the upstream bank/provider, creates a `MerchantTempOrder`, and returns a `transaction_id` along with instructions (e.g. prompt for OTP/PIN, display LightBox, or redirect).\n- **Stage 2 (Complete Payment)**: The customer enters their confirmation code (OTP/PIN). The merchant calls `POST /api/v12/complete/payment/{gateway}` with `transaction_id` and confirmation credentials. Tlync verifies with the gateway, creates the finalized `MerchantOrder`, settles double-entry ledger charges, dispatches real-time webhooks, and returns the receipt payload.\n\n---\n\n## Authentication & Security\n\n- **Shop API Bearer Token**: All server-to-server endpoints require an API Bearer token generated in the Tlync Merchant Portal with permissions for the corresponding Shop UUID (`store_uuid`).\n  ```http\n  Authorization: Bearer <YOUR_MERCHANT_SHOP_API_TOKEN>\n  Accept: application/json\n  Content-Type: application/json\n  ```\n- **Checkout Session Key (`X-Checkout-Key`)**: Browser-facing checkout endpoints use a temporary, scoped session secret passed in the `X-Checkout-Key` HTTP header.\n- **Signed URLs**: Browser payment redirects and WebViews (such as Moamalat LightBox) use cryptographically signed URLs with expiration timestamps (`signature` & `expires`).\n\n---\n\n## Idempotency & Concurrency Protection\n\nTo prevent duplicate charges caused by network retries or accidental double-clicks:\n- Send the `Idempotency-Key` header (or include `idempotency_key` in the request JSON).\n- Tlync enforces atomic Redis/Database cache locks on both initiation (`initiate_order_lock:{shop}:{key}`) and completion (`complete_payment_lock:{temp_order}:{key}`).\n- Replays with the identical idempotency key return the cached result safely without re-charging the customer.\n\n---\n\n## Webhooks & Callbacks\n\nUpon successful payment completion, Tlync dispatches a `POST` webhook to your registered `backend_url`:\n- **Retries**: Up to 3 attempts with exponential backoff (`1m`, `5m`).\n- **Headers**: Includes `Idempotency-Key` (`{order_id}:payment.success`), `X-Event: payment.success`, and `X-Delivery-Attempt: {attempt_number}`.\n- **Acknowledgment**: Your webhook endpoint must return an HTTP `2xx` response.",
+    "contact": {
+      "name": "Tlync Developer Support",
+      "email": "support@tlync.com",
+      "url": "https://tlync.com/developers"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://api.tlync.com",
+      "description": "Production Server"
+    },
+    {
+      "url": "https://sandbox.tlync.com",
+      "description": "Sandbox / Staging Server"
+    },
+    {
+      "url": "http://localhost:8000",
+      "description": "Local Development Server"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Gateway Discovery",
+      "description": "Query available and active payment gateways configured for the merchant shop."
+    },
+    {
+      "name": "Hosted Checkout (Server)",
+      "description": "Shop-authenticated endpoints to create and verify hosted checkout sessions."
+    },
+    {
+      "name": "Hosted Checkout (Client)",
+      "description": "Browser and frontend endpoints driving the hosted payment checkout UI using X-Checkout-Key."
+    },
+    {
+      "name": "Edfali Gateway",
+      "description": "Direct integration for Edfali bank card and mobile wallet payments."
+    },
+    {
+      "name": "Sadad Gateway",
+      "description": "Direct integration for Sadad (Al-Madar) mobile wallet payments with OTP verification and SMS resend."
+    },
+    {
+      "name": "Mobicash Gateway",
+      "description": "Direct integration for Mobicash (Wahda Bank) mobile payments with financial PIN verification."
+    },
+    {
+      "name": "Moamalat Gateway",
+      "description": "Direct integration for Moamalat card gateway supporting embedded LightBox widgets and WebViews."
+    },
+    {
+      "name": "Masarat Gateway (Yusor & Musrefy)",
+      "description": "Direct integration for Masarat national payment gateway (Yusor for Jumhouria Bank, Musrefy for Commerce & Development Bank)."
+    },
+    {
+      "name": "Tadawul Gateway",
+      "description": "Direct integration for Tadawul banking and card processing services."
+    },
+    {
+      "name": "Test Gateway",
+      "description": "Mock sandbox gateway for local simulation, automated testing, and QA validation."
+    },
+    {
+      "name": "Webhooks",
+      "description": "Asynchronous event notifications dispatched to merchant backend servers."
+    }
+  ],
+  "paths": {
+    "/api/v12/fetch/gateways": {
+      "get": {
+        "tags": ["Gateway Discovery"],
+        "summary": "Fetch Active Gateways for Merchant Shop",
+        "description": "Retrieves the list of active payment gateways assigned to the authenticated merchant shop. Each item in the list contains display names (in English and Arabic), logo URLs, transaction amount limits, required input fields, confirmation types (e.g., `otp`, `pin`, `lightbox`), and endpoint URLs.",
+        "operationId": "fetchGateways",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active gateways list returned successfully.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FetchGatewaysResponse"
+                },
+                "example": {
+                  "result": "success",
+                  "store_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                  "gateways": [
+                    {
+                      "slug": "edfali-gateway",
+                      "name": "Edfali",
+                      "name_ar": "إدفع لي",
+                      "logo_url": "https://api.tlync.com/storage/gateways/edfali.png",
+                      "currency": "LYD",
+                      "confirmation_type": "pin",
+                      "min_amount": 1.0,
+                      "max_amount": 5000.0,
+                      "required_fields": ["phone"],
+                      "routes": {
+                        "initiate": "https://api.tlync.com/api/v12/initiate/payment/edfali-gateway",
+                        "complete": "https://api.tlync.com/api/v12/complete/payment/edfali-gateway"
+                      }
+                    },
+                    {
+                      "slug": "sadad-gateway",
+                      "name": "Sadad",
+                      "name_ar": "سداد",
+                      "logo_url": "https://api.tlync.com/storage/gateways/sadad.png",
+                      "currency": "LYD",
+                      "confirmation_type": "otp",
+                      "min_amount": 1.0,
+                      "max_amount": 10000.0,
+                      "required_fields": ["phone", "birth_year"],
+                      "routes": {
+                        "initiate": "https://api.tlync.com/api/v12/initiate/payment/sadad-gateway",
+                        "complete": "https://api.tlync.com/api/v12/complete/payment/sadad-gateway",
+                        "resend_otp": "https://api.tlync.com/api/v12/resend-otp/payment/sadad-gateway"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedError"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenError"
+          }
+        }
+      }
+    },
+    "/api/v12/checkout/sessions": {
+      "post": {
+        "tags": ["Hosted Checkout (Server)"],
+        "summary": "Create Hosted Checkout Session",
+        "description": "Creates a new hosted checkout session for an order. Returns a unique session ID and a ready-to-use checkout URL where you can redirect your customer.",
+        "operationId": "createCheckoutSession",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKeyHeader"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCheckoutSessionRequest"
+              },
+              "example": {
+                "amount": 120.5,
+                "custom_ref": "ORDER-98231",
+                "backend_url": "https://merchant.example.com/webhooks/payment",
+                "frontend_url": "https://merchant.example.com/checkout/success",
+                "failed_front_end_url": "https://merchant.example.com/checkout/failed",
+                "failed_backend_url": "https://merchant.example.com/webhooks/failed",
+                "customer": {
+                  "phone": "0912345678",
+                  "email": "customer@example.com",
+                  "birth_year": 1990
+                },
+                "locale": "en",
+                "expires_in_minutes": 60
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Checkout session created successfully.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateCheckoutSessionResponse"
+                },
+                "example": {
+                  "result": "success",
+                  "session_id": "8f3b2e7a-9a4d-4b8c-b639-6efc9e782d41",
+                  "url": "https://checkout.tlync.com/pay/8f3b2e7a-9a4d-4b8c-b639-6efc9e782d41?key=chk_sec_9a12bc",
+                  "status": "open",
+                  "custom_ref": "ORDER-98231",
+                  "amount": "120.500",
+                  "currency": "LYD",
+                  "expires_at": "2026-09-21T20:15:00Z"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequestError"
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedError"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationError"
+          }
+        }
+      }
+    },
+    "/api/v12/checkout/sessions/{session}": {
+      "get": {
+        "tags": ["Hosted Checkout (Server)"],
+        "summary": "Retrieve Checkout Session (Server Reconcile)",
+        "description": "Allows the merchant server to fetch the status and details of an existing checkout session to reconcile payments server-to-server.",
+        "operationId": "getCheckoutSessionServer",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "description": "The UUID of the checkout session.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session details retrieved successfully.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": { "type": "string", "example": "success" },
+                    "session": { "$ref": "#/components/schemas/CheckoutSessionDetail" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/UnauthorizedError" },
+          "404": { "$ref": "#/components/responses/NotFoundError" }
+        }
+      }
+    },
+    "/api/v12/checkout/{session}": {
+      "get": {
+        "tags": ["Hosted Checkout (Client)"],
+        "summary": "Get Checkout Session UI State (Browser)",
+        "description": "Invoked by the hosted checkout frontend or WebView. Returns order summary, active gateway options, and customer pre-fill values.",
+        "operationId": "getCheckoutClientState",
+        "security": [
+          {
+            "CheckoutKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "description": "The UUID of the checkout session.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Checkout page state returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckoutSessionDetail"
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/UnauthorizedError" },
+          "404": { "$ref": "#/components/responses/NotFoundError" },
+          "429": { "$ref": "#/components/responses/RateLimitError" }
+        }
+      }
+    },
+    "/api/v12/checkout/{session}/initiate": {
+      "post": {
+        "tags": ["Hosted Checkout (Client)"],
+        "summary": "Initiate Payment Gateway Attempt (Browser)",
+        "description": "Called when the customer selects a payment gateway in the checkout UI and clicks pay. Triggers Stage 1 initiation for that gateway.",
+        "operationId": "initiateCheckoutAttempt",
+        "security": [
+          {
+            "CheckoutKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "description": "The UUID of the checkout session.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InitiateCheckoutRequest"
+              },
+              "example": {
+                "gateway": "sadad-gateway",
+                "phone": "0912345678",
+                "birth_year": 1990
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Payment attempt initiated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InitiateCheckoutResponse"
+                }
+              }
+            }
+          },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimitError" }
+        }
+      }
+    },
+    "/api/v12/checkout/{session}/complete": {
+      "post": {
+        "tags": ["Hosted Checkout (Client)"],
+        "summary": "Complete Payment Attempt with OTP/PIN (Browser)",
+        "description": "Called when the customer submits the OTP or PIN code in the checkout UI to complete the transaction.",
+        "operationId": "completeCheckoutAttempt",
+        "security": [
+          {
+            "CheckoutKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "description": "The UUID of the checkout session.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteCheckoutRequest"
+              },
+              "example": {
+                "code": "482910"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Payment successfully completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompleteCheckoutResponse"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequestError" },
+          "422": { "$ref": "#/components/responses/ValidationError" },
+          "429": { "$ref": "#/components/responses/RateLimitError" }
+        }
+      }
+    },
+    "/api/v12/checkout/{session}/resend": {
+      "post": {
+        "tags": ["Hosted Checkout (Client)"],
+        "summary": "Resend OTP (Browser)",
+        "description": "Requests the payment provider to send a fresh SMS OTP code to the customer's phone number.",
+        "operationId": "resendCheckoutOtp",
+        "security": [
+          {
+            "CheckoutKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "description": "The UUID of the checkout session.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OTP resent successfully.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": { "type": "string", "example": "success" },
+                    "message": { "type": "string", "example": "OTP resent successfully." }
+                  }
+                }
+              }
+            }
+          },
+          "429": { "$ref": "#/components/responses/RateLimitError" }
+        }
+      }
+    },
+    "/api/v12/checkout/{session}/status": {
+      "get": {
+        "tags": ["Hosted Checkout (Client)"],
+        "summary": "Poll Checkout Session Status (Browser)",
+        "description": "Allows the browser to poll for status updates (e.g. while awaiting asynchronous LightBox callbacks or bank processing).",
+        "operationId": "getCheckoutStatus",
+        "security": [
+          {
+            "CheckoutKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "description": "The UUID of the checkout session.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Status payload returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckoutStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v12/checkout/{session}/cancel": {
+      "post": {
+        "tags": ["Hosted Checkout (Client)"],
+        "summary": "Cancel Checkout Session (Browser)",
+        "description": "Explicitly cancels the checkout session if the customer chooses to abort payment, returning the failure redirect URL.",
+        "operationId": "cancelCheckoutSession",
+        "security": [
+          {
+            "CheckoutKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "description": "The UUID of the checkout session.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session cancelled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "example": "cancelled" },
+                    "redirect_url": { "type": "string", "example": "https://merchant.example.com/checkout/failed" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v12/initiate/payment/edfali-gateway": {
+      "post": {
+        "tags": ["Edfali Gateway"],
+        "summary": "Stage 1: Initiate Edfali Payment",
+        "description": "Initiates a new payment request via Edfali. Pre-authorizes the order with the bank and creates a `MerchantTempOrder`. Returns the `transaction_id` required for Stage 2 PIN verification.",
+        "operationId": "initiateEdfali",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/InitiateEdfaliRequest" },
+              "example": {
+                "store_uuid": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                "amount": 75.0,
+                "phone": "0921234567",
+                "custom_ref": "INV-10023",
+                "backend_url": "https://merchant.example.com/webhooks/edfali",
+                "frontend_url": "https://merchant.example.com/orders/success"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Temporary order initiated successfully.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/InitiatePaymentResponse" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/UnauthorizedError" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/complete/payment/edfali-gateway": {
+      "post": {
+        "tags": ["Edfali Gateway"],
+        "summary": "Stage 2: Complete Edfali Payment",
+        "description": "Confirms the payment with the customer's Edfali PIN code. Once confirmed, creates the final `MerchantOrder`, records ledger entries, and queues the merchant webhook.",
+        "operationId": "completeEdfali",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CompleteEdfaliRequest" },
+              "example": {
+                "transaction_id": "7f8b9a10-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
+                "pin": "1234",
+                "idempotency_key": "edfali-complete-INV-10023"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Payment completed successfully.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CompletePaymentResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequestError" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/initiate/payment/sadad-gateway": {
+      "post": {
+        "tags": ["Sadad Gateway"],
+        "summary": "Stage 1: Initiate Sadad Payment",
+        "description": "Initiates payment via Sadad (Al-Madar). Requires customer's phone number and 4-digit birth year (`birth_year`). Sadad sends an SMS OTP to the customer's phone.",
+        "operationId": "initiateSadad",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/InitiateSadadRequest" },
+              "example": {
+                "store_uuid": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                "amount": 150.0,
+                "phone": "0912345678",
+                "birth_year": 1988,
+                "custom_ref": "ORDER-54321",
+                "backend_url": "https://merchant.example.com/webhooks/sadad",
+                "frontend_url": "https://merchant.example.com/orders/success"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Temporary order initiated, OTP sent to customer.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/InitiatePaymentResponse" }
+              }
+            }
+          },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/complete/payment/sadad-gateway": {
+      "post": {
+        "tags": ["Sadad Gateway"],
+        "summary": "Stage 2: Complete Sadad Payment",
+        "description": "Verifies the SMS OTP received by the customer to finalize the Sadad payment.",
+        "operationId": "completeSadad",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CompleteSadadRequest" },
+              "example": {
+                "transaction_id": "7f8b9a10-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
+                "otp": "839201",
+                "idempotency_key": "sadad-complete-ORDER-54321"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sadad payment completed successfully.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CompletePaymentResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequestError" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/resend-otp/payment/sadad-gateway": {
+      "post": {
+        "tags": ["Sadad Gateway"],
+        "summary": "Resend Sadad OTP",
+        "description": "Requests Sadad to re-send the SMS OTP verification code to the payer's mobile phone.",
+        "operationId": "resendSadadOtp",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ResendSadadOtpRequest" },
+              "example": {
+                "transaction_id": "7f8b9a10-2c3d-4e5f-8a9b-0c1d2e3f4a5b"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OTP resent successfully.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ResendSadadOtpResponse" }
+              }
+            }
+          },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/initiate/payment/mobicash-gateway": {
+      "post": {
+        "tags": ["Mobicash Gateway"],
+        "summary": "Stage 1: Initiate Mobicash Payment",
+        "description": "Initiates payment via Mobicash (Wahda Bank). Requires customer's phone number.",
+        "operationId": "initiateMobicash",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/InitiateMobicashRequest" },
+              "example": {
+                "store_uuid": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                "amount": 200.0,
+                "phone": "0912345678",
+                "custom_ref": "ORDER-MOB-882",
+                "backend_url": "https://merchant.example.com/webhooks/mobicash",
+                "frontend_url": "https://merchant.example.com/orders/success"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Temporary order initiated successfully.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/InitiatePaymentResponse" }
+              }
+            }
+          },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/complete/payment/mobicash-gateway": {
+      "post": {
+        "tags": ["Mobicash Gateway"],
+        "summary": "Stage 2: Complete Mobicash Payment",
+        "description": "Confirms the payment with the customer's Mobicash secret PIN/OTP code.",
+        "operationId": "completeMobicash",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CompleteMobicashRequest" },
+              "example": {
+                "transaction_id": "7f8b9a10-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
+                "pin": "5678",
+                "idempotency_key": "mobicash-complete-ORDER-MOB-882"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Mobicash payment completed successfully.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CompletePaymentResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequestError" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/initiate/payment/moamalat-gateway": {
+      "post": {
+        "tags": ["Moamalat Gateway"],
+        "summary": "Stage 1: Initiate Moamalat Payment",
+        "description": "Initiates Moamalat card payment. Returns a signed WebView URL (`url`) and raw LightBox widget parameters (`lightbox_url`, `merchant_id`, `terminal_id`, `secure_hash`, and callback endpoints) so you can either redirect the customer or embed the card widget directly.",
+        "operationId": "initiateMoamalat",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/InitiateMoamalatRequest" },
+              "example": {
+                "store_uuid": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                "amount": 350.0,
+                "phone": "0912345678",
+                "custom_ref": "ORDER-MOA-991",
+                "backend_url": "https://merchant.example.com/webhooks/moamalat",
+                "frontend_url": "https://merchant.example.com/orders/success",
+                "failed_front_end_url": "https://merchant.example.com/orders/failed"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Temporary order created with LightBox configurations.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/InitiateMoamalatResponse" }
+              }
+            }
+          },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/complete/payment/moamalat-gateway": {
+      "post": {
+        "tags": ["Moamalat Gateway"],
+        "summary": "Stage 2: Poll / Reconcile Moamalat Payment",
+        "description": "Moamalat completes primarily via browser LightBox callbacks. This endpoint allows the merchant server to poll or reconcile the transaction status server-to-server.",
+        "operationId": "completeMoamalatServer",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CompleteMoamalatRequest" },
+              "example": {
+                "transaction_id": "7f8b9a10-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
+                "network_reference": "202609210001",
+                "idempotency_key": "moamalat-poll-ORDER-MOA-991"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Moamalat payment confirmed.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CompletePaymentResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequestError" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/moamalat-gateway/pay/{tempOrder}": {
+      "get": {
+        "tags": ["Moamalat Gateway"],
+        "summary": "Hosted Moamalat LightBox Payment Page (WebView)",
+        "description": "Serves the hosted HTML payment view embedding Moamalat's LightBox card widget. Accessible via the signed URL generated during payment initiation.",
+        "operationId": "showMoamalatPayPage",
+        "security": [{ "SignedUrlAuth": [] }],
+        "parameters": [
+          {
+            "name": "tempOrder",
+            "in": "path",
+            "required": true,
+            "description": "The UUID of the temporary order.",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTML page rendered.",
+            "content": {
+              "text/html": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFoundError" }
+        }
+      }
+    },
+    "/api/v12/moamalat-gateway/callback/complete/{tempOrder}": {
+      "post": {
+        "tags": ["Moamalat Gateway"],
+        "summary": "Moamalat LightBox Success Callback (Browser / Widget)",
+        "description": "Called by Moamalat's JavaScript widget upon successful card charge. Verifies the cryptographic payload hash and finalizes the order.",
+        "operationId": "moamalatCallbackComplete",
+        "security": [{ "SignedUrlAuth": [] }],
+        "parameters": [
+          {
+            "name": "tempOrder",
+            "in": "path",
+            "required": true,
+            "description": "The UUID of the temporary order.",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/MoamalatCallbackSuccessRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Callback verified and order completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "example": true },
+                    "message": { "type": "string", "example": "Payment completed successfully" },
+                    "transaction_id": { "type": "string", "format": "uuid" },
+                    "custom_ref": { "type": "string" },
+                    "redirect_url": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequestError" }
+        }
+      }
+    },
+    "/api/v12/moamalat-gateway/callback/error/{tempOrder}": {
+      "post": {
+        "tags": ["Moamalat Gateway"],
+        "summary": "Moamalat LightBox Error / Decline Callback (Browser / Widget)",
+        "description": "Called by Moamalat's widget if the card is declined, OTP fails, or the customer cancels.",
+        "operationId": "moamalatCallbackError",
+        "security": [{ "SignedUrlAuth": [] }],
+        "parameters": [
+          {
+            "name": "tempOrder",
+            "in": "path",
+            "required": true,
+            "description": "The UUID of the temporary order.",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/MoamalatCallbackErrorRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Failure recorded and redirect URL provided.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": { "type": "boolean", "example": false },
+                    "message": { "type": "string", "example": "Declined by issuing bank" },
+                    "transaction_id": { "type": "string", "format": "uuid" },
+                    "redirect_url": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v12/moamalat-gateway/simulate/{tempOrder}": {
+      "post": {
+        "tags": ["Moamalat Gateway"],
+        "summary": "Moamalat Simulator Callback (Sandbox Only)",
+        "description": "Generates a simulated, cryptographically signed Moamalat response payload for sandbox testing without requiring real bank cards.",
+        "operationId": "moamalatSimulate",
+        "security": [{ "SignedUrlAuth": [] }],
+        "parameters": [
+          {
+            "name": "tempOrder",
+            "in": "path",
+            "required": true,
+            "description": "The UUID of the temporary order.",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/MoamalatSimulateRequest" },
+              "example": {
+                "outcome": "success"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Simulated callback payload and URL returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "callback_url": { "type": "string" },
+                    "payload": { "type": "object" }
+                  }
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFoundError" }
+        }
+      }
+    },
+    "/api/v12/initiate/payment/yusor-gateway": {
+      "post": {
+        "tags": ["Masarat Gateway (Yusor & Musrefy)"],
+        "summary": "Stage 1: Initiate Yusor (Jumhouria Bank) Payment",
+        "description": "Initiates payment via Masarat Yusor for Jumhouria Bank accounts. Requires customer's National Identity Card number (`identity_card`).",
+        "operationId": "initiateYusor",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/InitiateYusorRequest" },
+              "example": {
+                "store_uuid": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                "amount": 250.0,
+                "identity_card": "119900123456",
+                "phone": "0912345678",
+                "custom_ref": "ORDER-YUS-301",
+                "backend_url": "https://merchant.example.com/webhooks/yusor",
+                "frontend_url": "https://merchant.example.com/orders/success"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Temporary order initiated, OTP dispatched.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/InitiatePaymentResponse" }
+              }
+            }
+          },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/complete/payment/yusor-gateway": {
+      "post": {
+        "tags": ["Masarat Gateway (Yusor & Musrefy)"],
+        "summary": "Stage 2: Complete Yusor Payment",
+        "description": "Confirms Yusor payment with the SMS OTP received on the bank-registered phone.",
+        "operationId": "completeYusor",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CompleteYusorRequest" },
+              "example": {
+                "transaction_id": "7f8b9a10-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
+                "otp": "452136",
+                "idempotency_key": "yusor-complete-ORDER-YUS-301"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Yusor payment finalized.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CompletePaymentResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequestError" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/initiate/payment/musrefy-gateway": {
+      "post": {
+        "tags": ["Masarat Gateway (Yusor & Musrefy)"],
+        "summary": "Stage 1: Initiate Musrefy (BCI Bank) Payment",
+        "description": "Initiates payment via Masarat Musrefy (Bank of Commerce & Development). Requires customer's National Identity Card number (`identity_card`).",
+        "operationId": "initiateMusrefy",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/InitiateMusrefyRequest" },
+              "example": {
+                "store_uuid": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                "amount": 180.0,
+                "identity_card": "119850654321",
+                "phone": "0921234567",
+                "custom_ref": "ORDER-MUS-402",
+                "backend_url": "https://merchant.example.com/webhooks/musrefy",
+                "frontend_url": "https://merchant.example.com/orders/success"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Temporary order initiated, OTP dispatched.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/InitiatePaymentResponse" }
+              }
+            }
+          },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/complete/payment/musrefy-gateway": {
+      "post": {
+        "tags": ["Masarat Gateway (Yusor & Musrefy)"],
+        "summary": "Stage 2: Complete Musrefy Payment",
+        "description": "Confirms Musrefy payment with the OTP code.",
+        "operationId": "completeMusrefy",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CompleteMusrefyRequest" },
+              "example": {
+                "transaction_id": "7f8b9a10-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
+                "otp": "908124",
+                "idempotency_key": "musrefy-complete-ORDER-MUS-402"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Musrefy payment completed successfully.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CompletePaymentResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequestError" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/initiate/payment/tadawul-gateway": {
+      "post": {
+        "tags": ["Tadawul Gateway"],
+        "summary": "Stage 1: Initiate Tadawul Payment",
+        "description": "Initiates payment via Tadawul banking and payment services.",
+        "operationId": "initiateTadawul",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/InitiateTadawulRequest" },
+              "example": {
+                "store_uuid": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                "amount": 95.0,
+                "phone": "0912345678",
+                "custom_ref": "ORDER-TAD-551",
+                "backend_url": "https://merchant.example.com/webhooks/tadawul",
+                "frontend_url": "https://merchant.example.com/orders/success"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Temporary order initiated.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/InitiatePaymentResponse" }
+              }
+            }
+          },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/complete/payment/tadawul-gateway": {
+      "post": {
+        "tags": ["Tadawul Gateway"],
+        "summary": "Stage 2: Complete Tadawul Payment",
+        "description": "Confirms Tadawul payment with the customer's OTP or confirmation PIN.",
+        "operationId": "completeTadawul",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CompleteTadawulRequest" },
+              "example": {
+                "transaction_id": "7f8b9a10-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
+                "otp": "612459",
+                "idempotency_key": "tadawul-complete-ORDER-TAD-551"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Tadawul payment completed.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CompletePaymentResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequestError" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/initiate/payment/test-gateway": {
+      "post": {
+        "tags": ["Test Gateway"],
+        "summary": "Stage 1: Initiate Test Sandbox Payment",
+        "description": "Initiates a mock transaction in the sandbox environment. Accepts any valid Libyan phone number and amount.",
+        "operationId": "initiateTestGateway",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/InitiateTestGatewayRequest" },
+              "example": {
+                "store_uuid": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                "amount": 50.0,
+                "phone": "0912345678",
+                "custom_ref": "TEST-SIM-001",
+                "backend_url": "https://merchant.example.com/webhooks/test",
+                "frontend_url": "https://merchant.example.com/orders/success"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Test order created successfully.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/InitiatePaymentResponse" },
+                "example": {
+                  "result": "success",
+                  "custom_ref": "TEST-SIM-001",
+                  "transaction_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                  "url": "https://example.com/stagetwo/9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                  "next_step": "pin",
+                  "message": "Enter 4-digit PIN (e.g. 1111) to complete test payment."
+                }
+              }
+            }
+          },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v12/complete/payment/test-gateway": {
+      "post": {
+        "tags": ["Test Gateway"],
+        "summary": "Stage 2: Complete Test Sandbox Payment",
+        "description": "Finalizes the sandbox test order. Provide any 4-digit numeric PIN (e.g. `1111` or `1234`) to simulate success.",
+        "operationId": "completeTestGateway",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKeyHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CompleteTestGatewayRequest" },
+              "example": {
+                "transaction_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+                "pin": "1111",
+                "idempotency_key": "test-complete-TEST-SIM-001"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Test payment completed successfully.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CompletePaymentResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequestError" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "Sanctum Token",
+        "description": "Merchant Shop API Token generated in the Tlync portal (`auth:sanctum`). Must have ability for the requested `store_uuid`."
+      },
+      "CheckoutKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Checkout-Key",
+        "description": "Per-session secret key created with the checkout session (`X-Checkout-Key`)."
+      },
+      "SignedUrlAuth": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "signature",
+        "description": "HMAC SHA-256 signature generated by Laravel signed routes (`URL::temporarySignedRoute`)."
+      }
+    },
+    "parameters": {
+      "IdempotencyKeyHeader": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "description": "Unique key to ensure safe request retries without duplicate charging.",
+        "schema": {
+          "type": "string",
+          "maxLength": 255
+        }
+      }
+    },
+    "schemas": {
+      "FetchGatewaysResponse": {
+        "type": "object",
+        "required": ["result", "store_id", "gateways"],
+        "properties": {
+          "result": { "type": "string", "example": "success" },
+          "store_id": { "type": "string", "format": "uuid" },
+          "gateways": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/GatewayDetail" }
+          }
+        }
+      },
+      "GatewayDetail": {
+        "type": "object",
+        "required": ["slug", "name", "currency", "confirmation_type", "routes"],
+        "properties": {
+          "slug": { "type": "string", "example": "sadad-gateway" },
+          "name": { "type": "string", "example": "Sadad" },
+          "name_ar": { "type": "string", "example": "سداد" },
+          "logo_url": { "type": "string", "format": "uri" },
+          "currency": { "type": "string", "example": "LYD" },
+          "confirmation_type": { "type": "string", "enum": ["otp", "pin", "lightbox", "redirect"], "example": "otp" },
+          "min_amount": { "type": "number", "example": 1.0 },
+          "max_amount": { "type": "number", "example": 10000.0 },
+          "required_fields": {
+            "type": "array",
+            "items": { "type": "string" },
+            "example": ["phone", "birth_year"]
+          },
+          "routes": {
+            "type": "object",
+            "properties": {
+              "initiate": { "type": "string", "format": "uri" },
+              "complete": { "type": "string", "format": "uri" },
+              "resend_otp": { "type": "string", "format": "uri" }
+            }
+          }
+        }
+      },
+      "CreateCheckoutSessionRequest": {
+        "type": "object",
+        "required": ["amount", "custom_ref", "backend_url", "frontend_url"],
+        "properties": {
+          "amount": {
+            "type": "number",
+            "minimum": 1,
+            "description": "Total payment amount in Libyan Dinars (up to 3 decimal places).",
+            "example": 120.5
+          },
+          "custom_ref": {
+            "type": "string",
+            "maxLength": 255,
+            "description": "Your internal order reference or invoice number. Must be unique per shop.",
+            "example": "ORDER-98231"
+          },
+          "backend_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Webhook endpoint on your server that receives payment results.",
+            "example": "https://merchant.example.com/webhooks/payment"
+          },
+          "frontend_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Customer return URL upon successful payment completion.",
+            "example": "https://merchant.example.com/checkout/success"
+          },
+          "failed_front_end_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Customer return URL if payment fails or is cancelled.",
+            "example": "https://merchant.example.com/checkout/failed"
+          },
+          "failed_backend_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Optional webhook endpoint receiving notifications on failed attempts.",
+            "example": "https://merchant.example.com/webhooks/failed"
+          },
+          "attempt_webhook": {
+            "type": "string",
+            "format": "uri",
+            "description": "Optional webhook endpoint called on every intermediate stage change.",
+            "example": "https://merchant.example.com/webhooks/attempts"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 255,
+            "description": "Idempotency key for session creation.",
+            "example": "chk-ord-98231"
+          },
+          "customer": {
+            "type": "object",
+            "properties": {
+              "phone": { "type": "string", "description": "Libyan mobile phone (09X or 2189X).", "example": "0912345678" },
+              "email": { "type": "string", "format": "email", "example": "customer@example.com" },
+              "identity_card": { "type": "string", "description": "National ID card number (for Yusor / Musrefy).", "example": "119900123456" },
+              "birth_year": { "type": "integer", "description": "4-digit year of birth (for Sadad).", "example": 1990 }
+            }
+          },
+          "locale": {
+            "type": "string",
+            "enum": ["ar_LY", "en"],
+            "default": "ar_LY",
+            "example": "en"
+          },
+          "template": {
+            "type": "string",
+            "description": "Hosted checkout visual template theme.",
+            "example": "modern"
+          },
+          "expires_in_minutes": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 1440,
+            "default": 60,
+            "description": "Session expiration window in minutes.",
+            "example": 60
+          }
+        }
+      },
+      "CreateCheckoutSessionResponse": {
+        "type": "object",
+        "required": ["result", "session_id", "url", "status", "custom_ref", "amount", "currency"],
+        "properties": {
+          "result": { "type": "string", "example": "success" },
+          "session_id": { "type": "string", "format": "uuid" },
+          "url": { "type": "string", "format": "uri", "description": "Redirect the customer to this URL." },
+          "status": { "type": "string", "enum": ["open", "completed", "expired", "cancelled"], "example": "open" },
+          "custom_ref": { "type": "string", "example": "ORDER-98231" },
+          "amount": { "type": "string", "example": "120.500" },
+          "currency": { "type": "string", "example": "LYD" },
+          "expires_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "CheckoutSessionDetail": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "example": "open" },
+          "amount": { "type": "string", "example": "120.500" },
+          "currency": { "type": "string", "example": "LYD" },
+          "custom_ref": { "type": "string", "example": "ORDER-98231" },
+          "customer": { "type": "object" },
+          "available_gateways": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/GatewayDetail" }
+          },
+          "created_at": { "type": "string", "format": "date-time" },
+          "expires_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "InitiateCheckoutRequest": {
+        "type": "object",
+        "required": ["gateway"],
+        "properties": {
+          "gateway": { "type": "string", "example": "sadad-gateway" },
+          "phone": { "type": "string", "example": "0912345678" },
+          "birth_year": { "type": "integer", "example": 1990 },
+          "identity_card": { "type": "string", "example": "119900123456" }
+        }
+      },
+      "InitiateCheckoutResponse": {
+        "type": "object",
+        "properties": {
+          "result": { "type": "string", "example": "success" },
+          "attempt_id": { "type": "string", "format": "uuid" },
+          "gateway": { "type": "string", "example": "sadad-gateway" },
+          "next_step": { "type": "string", "enum": ["otp", "pin", "lightbox", "redirect"], "example": "otp" },
+          "message": { "type": "string", "example": "SMS OTP code sent to customer phone." },
+          "resend_available": { "type": "boolean", "example": true }
+        }
+      },
+      "CompleteCheckoutRequest": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "string", "description": "OTP or PIN code provided by customer.", "example": "482910" },
+          "network_reference": { "type": "string", "example": "202609210001" }
+        }
+      },
+      "CompleteCheckoutResponse": {
+        "type": "object",
+        "properties": {
+          "result": { "type": "string", "example": "success" },
+          "status": { "type": "string", "example": "completed" },
+          "redirect_url": { "type": "string", "format": "uri" },
+          "order_id": { "type": "string", "format": "uuid" },
+          "custom_ref": { "type": "string", "example": "ORDER-98231" }
+        }
+      },
+      "CheckoutStatusResponse": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "enum": ["open", "processing", "completed", "failed", "cancelled", "expired"], "example": "completed" },
+          "redirect_url": { "type": "string", "format": "uri" }
+        }
+      },
+      "BaseInitiatePayload": {
+        "type": "object",
+        "required": ["amount", "custom_ref", "backend_url"],
+        "properties": {
+          "store_uuid": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Your Merchant Shop UUID. Required unless using legacy `id`.",
+            "example": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+          },
+          "id": {
+            "type": "string",
+            "description": "Legacy integer Shop ID (mutually exclusive with `store_uuid`).",
+            "example": "42"
+          },
+          "amount": {
+            "type": "number",
+            "minimum": 1,
+            "description": "Payment amount in Libyan Dinars (LYD).",
+            "example": 150.0
+          },
+          "phone": {
+            "type": "string",
+            "description": "Libyan mobile phone (e.g. 0912345678 or 218912345678).",
+            "example": "0912345678"
+          },
+          "custom_ref": {
+            "type": "string",
+            "maxLength": 255,
+            "description": "Unique merchant order/invoice reference.",
+            "example": "ORDER-54321"
+          },
+          "backend_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Webhook endpoint where payment outcome is posted.",
+            "example": "https://merchant.example.com/webhooks/payment"
+          },
+          "frontend_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Customer redirect URL on successful payment.",
+            "example": "https://merchant.example.com/orders/success"
+          },
+          "failed_front_end_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Customer redirect URL on failed payment.",
+            "example": "https://merchant.example.com/orders/failed"
+          },
+          "failed_backend_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Webhook endpoint called on failed payment attempts.",
+            "example": "https://merchant.example.com/webhooks/failed"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 255,
+            "description": "Unique key to enforce idempotent payment initiation.",
+            "example": "init-key-ORDER-54321"
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "example": "customer@example.com"
+          }
+        }
+      },
+      "InitiateEdfaliRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/BaseInitiatePayload" }
+        ]
+      },
+      "CompleteEdfaliRequest": {
+        "type": "object",
+        "required": ["transaction_id", "pin", "idempotency_key"],
+        "properties": {
+          "transaction_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Temporary order ID received from Stage 1 initiation.",
+            "example": "7f8b9a10-2c3d-4e5f-8a9b-0c1d2e3f4a5b"
+          },
+          "pin": {
+            "type": "string",
+            "maxLength": 10,
+            "description": "Customer's Edfali secret PIN code (or pass as `otp`).",
+            "example": "1234"
+          },
+          "otp": {
+            "type": "string",
+            "description": "Alias for `pin`.",
+            "example": "1234"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "description": "Unique key to protect payment completion from duplicate charges.",
+            "example": "edfali-complete-INV-10023"
+          }
+        }
+      },
+      "InitiateSadadRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/BaseInitiatePayload" },
+          {
+            "type": "object",
+            "required": ["birth_year"],
+            "properties": {
+              "birth_year": {
+                "type": "integer",
+                "description": "Customer's 4-digit birth year registered with Al-Madar Sadad.",
+                "example": 1988
+              },
+              "service_category": {
+                "type": "integer",
+                "description": "Optional merchant category code.",
+                "example": 0
+              }
+            }
+          }
+        ]
+      },
+      "CompleteSadadRequest": {
+        "type": "object",
+        "required": ["transaction_id", "otp", "idempotency_key"],
+        "properties": {
+          "transaction_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Temporary order ID received from Stage 1 initiation.",
+            "example": "7f8b9a10-2c3d-4e5f-8a9b-0c1d2e3f4a5b"
+          },
+          "otp": {
+            "type": "string",
+            "description": "SMS OTP code received on customer's phone (4 to 10 digits).",
+            "example": "839201"
+          },
+          "pin": {
+            "type": "string",
+            "description": "Alias for `otp`.",
+            "example": "839201"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "description": "Idempotency key for completion.",
+            "example": "sadad-complete-ORDER-54321"
+          }
+        }
+      },
+      "ResendSadadOtpRequest": {
+        "type": "object",
+        "required": ["transaction_id"],
+        "properties": {
+          "transaction_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Temporary order ID to resend OTP for.",
+            "example": "7f8b9a10-2c3d-4e5f-8a9b-0c1d2e3f4a5b"
+          }
+        }
+      },
+      "ResendSadadOtpResponse": {
+        "type": "object",
+        "properties": {
+          "result": { "type": "string", "example": "success" },
+          "message": { "type": "string", "example": "Sadad OTP resent successfully." }
+        }
+      },
+      "InitiateMobicashRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/BaseInitiatePayload" }
+        ]
+      },
+      "CompleteMobicashRequest": {
+        "type": "object",
+        "required": ["transaction_id", "pin", "idempotency_key"],
+        "properties": {
+          "transaction_id": {
+            "type": "string",
+            "format": "uuid",
+            "example": "7f8b9a10-2c3d-4e5f-8a9b-0c1d2e3f4a5b"
+          },
+          "pin": {
+            "type": "string",
+            "maxLength": 10,
+            "description": "Customer's Mobicash financial secret code.",
+            "example": "5678"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "example": "mobicash-complete-ORDER-MOB-882"
+          }
+        }
+      },
+      "InitiateMoamalatRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/BaseInitiatePayload" }
+        ]
+      },
+      "InitiateMoamalatResponse": {
+        "type": "object",
+        "properties": {
+          "result": { "type": "string", "example": "success" },
+          "custom_ref": { "type": "string", "example": "ORDER-MOA-991" },
+          "transaction_id": { "type": "string", "format": "uuid" },
+          "url": { "type": "string", "format": "uri", "description": "Hosted signed WebView pay page URL." },
+          "lightbox_url": { "type": "string", "format": "uri", "description": "Moamalat official JS library script URL." },
+          "merchant_id": { "type": "string", "example": "1008432" },
+          "terminal_id": { "type": "string", "example": "990145" },
+          "amount": { "type": "string", "example": "350000" },
+          "currency": { "type": "string", "example": "434" },
+          "secure_hash": { "type": "string", "description": "HMAC SHA-256 hash for Moamalat LightBox configuration." },
+          "complete_callback_url": { "type": "string", "format": "uri" },
+          "error_callback_url": { "type": "string", "format": "uri" }
+        }
+      },
+      "CompleteMoamalatRequest": {
+        "type": "object",
+        "required": ["transaction_id", "idempotency_key"],
+        "properties": {
+          "transaction_id": { "type": "string", "format": "uuid" },
+          "network_reference": { "type": "string", "description": "Optional Retrieval Reference Number (RRN) from bank.", "example": "202609210001" },
+          "idempotency_key": { "type": "string", "example": "moamalat-poll-ORDER-MOA-991" }
+        }
+      },
+      "MoamalatCallbackSuccessRequest": {
+        "type": "object",
+        "required": ["MerchantReference", "SystemReference", "NetworkReference", "Amount"],
+        "properties": {
+          "MerchantReference": { "type": "string", "description": "The transaction_id (tempOrder UUID)." },
+          "SystemReference": { "type": "string", "example": "SYS-908123" },
+          "NetworkReference": { "type": "string", "example": "202609210001" },
+          "Amount": { "type": "string", "example": "350000" },
+          "Currency": { "type": "string", "example": "434" },
+          "PaidThrough": { "type": "string", "example": "Card" },
+          "PayerAccount": { "type": "string", "example": "639504XXXXXX0860" },
+          "PayerName": { "type": "string", "example": "AHMED ALI" },
+          "TxnDate": { "type": "string", "example": "260921191500" }
+        }
+      },
+      "MoamalatCallbackErrorRequest": {
+        "type": "object",
+        "required": ["MerchantReference"],
+        "properties": {
+          "MerchantReference": { "type": "string" },
+          "ErrorMessage": { "type": "string", "example": "Declined by issuing bank" },
+          "Amount": { "type": "string" }
+        }
+      },
+      "MoamalatSimulateRequest": {
+        "type": "object",
+        "properties": {
+          "outcome": { "type": "string", "enum": ["success", "error"], "default": "success" }
+        }
+      },
+      "InitiateYusorRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/BaseInitiatePayload" },
+          {
+            "type": "object",
+            "required": ["identity_card"],
+            "properties": {
+              "identity_card": {
+                "type": "string",
+                "minLength": 6,
+                "maxLength": 32,
+                "description": "Customer's National Identification Number (NID).",
+                "example": "119900123456"
+              }
+            }
+          }
+        ]
+      },
+      "CompleteYusorRequest": {
+        "type": "object",
+        "required": ["transaction_id", "otp", "idempotency_key"],
+        "properties": {
+          "transaction_id": { "type": "string", "format": "uuid" },
+          "otp": { "type": "string", "description": "OTP code (4 to 8 digits).", "example": "452136" },
+          "idempotency_key": { "type": "string", "example": "yusor-complete-ORDER-YUS-301" }
+        }
+      },
+      "InitiateMusrefyRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/BaseInitiatePayload" },
+          {
+            "type": "object",
+            "required": ["identity_card"],
+            "properties": {
+              "identity_card": {
+                "type": "string",
+                "minLength": 6,
+                "maxLength": 32,
+                "description": "Customer's National Identification Number (NID).",
+                "example": "119850654321"
+              }
+            }
+          }
+        ]
+      },
+      "CompleteMusrefyRequest": {
+        "type": "object",
+        "required": ["transaction_id", "otp", "idempotency_key"],
+        "properties": {
+          "transaction_id": { "type": "string", "format": "uuid" },
+          "otp": { "type": "string", "description": "OTP code (4 to 8 digits).", "example": "908124" },
+          "idempotency_key": { "type": "string", "example": "musrefy-complete-ORDER-MUS-402" }
+        }
+      },
+      "InitiateTadawulRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/BaseInitiatePayload" }
+        ]
+      },
+      "CompleteTadawulRequest": {
+        "type": "object",
+        "required": ["transaction_id", "otp", "idempotency_key"],
+        "properties": {
+          "transaction_id": { "type": "string", "format": "uuid" },
+          "otp": { "type": "string", "description": "OTP or PIN code.", "example": "612459" },
+          "idempotency_key": { "type": "string", "example": "tadawul-complete-ORDER-TAD-551" }
+        }
+      },
+      "InitiateTestGatewayRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/BaseInitiatePayload" }
+        ]
+      },
+      "CompleteTestGatewayRequest": {
+        "type": "object",
+        "required": ["transaction_id", "pin", "idempotency_key"],
+        "properties": {
+          "transaction_id": { "type": "string", "format": "uuid" },
+          "pin": { "type": "string", "pattern": "^[0-9]{4}$", "description": "Any 4-digit PIN (e.g. 1111).", "example": "1111" },
+          "idempotency_key": { "type": "string", "example": "test-complete-TEST-SIM-001" }
+        }
+      },
+      "InitiatePaymentResponse": {
+        "type": "object",
+        "required": ["result", "custom_ref", "transaction_id", "url"],
+        "properties": {
+          "result": { "type": "string", "example": "success" },
+          "custom_ref": { "type": "string", "example": "ORDER-54321" },
+          "transaction_id": { "type": "string", "format": "uuid", "example": "7f8b9a10-2c3d-4e5f-8a9b-0c1d2e3f4a5b" },
+          "url": { "type": "string", "format": "uri", "description": "Confirmation or redirect URL.", "example": "https://api.tlync.com/stagetwo/7f8b9a10-2c3d-4e5f-8a9b-0c1d2e3f4a5b" },
+          "next_step": { "type": "string", "enum": ["otp", "pin", "lightbox", "redirect"], "example": "otp" },
+          "message": { "type": "string", "example": "SMS OTP code sent to customer phone." },
+          "resend_available": { "type": "boolean", "example": true },
+          "expires_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "CompletePaymentResponse": {
+        "type": "object",
+        "required": ["result", "data"],
+        "properties": {
+          "result": { "type": "string", "example": "success" },
+          "data": {
+            "type": "object",
+            "required": ["amount", "charges", "net_amount", "store_id", "our_ref", "payment_method", "custom_ref", "date"],
+            "properties": {
+              "amount": { "type": "number", "description": "Gross charged amount.", "example": 150.0 },
+              "charges": { "type": "number", "description": "Total commission fees deducted.", "example": 2.25 },
+              "net_amount": { "type": "number", "description": "Net amount credited to merchant ledger.", "example": 147.75 },
+              "store_id": { "type": "string", "format": "uuid", "example": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d" },
+              "our_ref": { "type": "string", "description": "Tlync global reference code.", "example": "TL-2026-908234" },
+              "payment_method": { "type": "string", "description": "Gateway name (Arabic).", "example": "سداد" },
+              "payment_method_en": { "type": "string", "description": "Gateway name (English).", "example": "Sadad" },
+              "customer_phone": { "type": "string", "example": "0912345678" },
+              "custom_ref": { "type": "string", "example": "ORDER-54321" },
+              "date": { "type": "string", "example": "2026-09-21 19:15:00" }
+            }
+          }
+        }
+      },
+      "WebhookPayload": {
+        "type": "object",
+        "required": ["result", "data"],
+        "properties": {
+          "result": { "type": "string", "example": "success" },
+          "data": {
+            "type": "object",
+            "properties": {
+              "amount": { "type": "number", "example": 150.0 },
+              "charges": { "type": "number", "example": 2.25 },
+              "net_amount": { "type": "number", "example": 147.75 },
+              "store_id": { "type": "string", "format": "uuid", "example": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d" },
+              "our_ref": { "type": "string", "example": "TL-2026-908234" },
+              "payment_method": { "type": "string", "example": "سداد" },
+              "payment_method_en": { "type": "string", "example": "Sadad" },
+              "customer_phone": { "type": "string", "example": "0912345678" },
+              "custom_ref": { "type": "string", "example": "ORDER-54321" },
+              "date": { "type": "string", "example": "2026-09-21 19:15:00" }
+            }
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["message"],
+        "properties": {
+          "message": { "type": "string", "example": "Invalid payment credentials or expired session." },
+          "code": { "type": "string", "example": "INVALID_CREDENTIALS" }
+        }
+      },
+      "ValidationErrorResponse": {
+        "type": "object",
+        "required": ["message", "errors"],
+        "properties": {
+          "message": { "type": "string", "example": "The given data was invalid." },
+          "errors": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "example": {
+              "phone": ["The phone must be a valid Libyan mobile number."],
+              "custom_ref": ["The custom ref has already been taken."]
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "BadRequestError": {
+        "description": "Bad Request — Invalid or expired transaction state.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "UnauthorizedError": {
+        "description": "Unauthorized — Missing or invalid Bearer API token or Checkout key.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "ForbiddenError": {
+        "description": "Forbidden — The token does not have permission to act on behalf of the specified shop.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "NotFoundError": {
+        "description": "Not Found — Requested resource or session does not exist.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      },
+      "ValidationError": {
+        "description": "Unprocessable Entity — Input validation failed.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ValidationErrorResponse" }
+          }
+        }
+      },
+      "RateLimitError": {
+        "description": "Too Many Requests — Rate limit exceeded.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+          }
+        }
+      }
+    }
+  }
+}
